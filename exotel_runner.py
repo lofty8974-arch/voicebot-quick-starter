@@ -1,12 +1,10 @@
 """Exotel runner — launches the common bot over Exotel telephony WebSocket.
-
 Run:  python exotel_runner.py
 """
-
+import sys
+import os
 from loguru import logger
-
 from bot import run_bot
-
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.exotel import ExotelFrameSerializer
@@ -15,17 +13,14 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
-
 async def bot(runner_args: RunnerArguments):
     """Entry point for Pipecat runner (Exotel telephony mode)."""
     transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
     logger.info(f"Auto-detected transport: {transport_type}")
-
     serializer = ExotelFrameSerializer(
         stream_sid=call_data["stream_id"],
         call_sid=call_data["call_id"],
     )
-
     transport = FastAPIWebsocketTransport(
         websocket=runner_args.websocket,
         params=FastAPIWebsocketParams(
@@ -35,17 +30,12 @@ async def bot(runner_args: RunnerArguments):
             serializer=serializer,
         ),
     )
-
     await run_bot(transport, runner_args, audio_sample_rate=8000)
 
-
 if __name__ == "__main__":
-    import sys
-
-    # Auto-set transport to exotel unless the user explicitly overrides it
+    os.environ.setdefault("HOST", "0.0.0.0")
+    os.environ.setdefault("PORT", "7860")
     if "-t" not in sys.argv and "--transport" not in sys.argv:
         sys.argv.extend(["-t", "exotel"])
-
     from pipecat.runner.run import main
-
     main()
