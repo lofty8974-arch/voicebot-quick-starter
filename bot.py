@@ -1,19 +1,18 @@
-"""Common bot logic: Google STT, Gemini Flash Lite (Vertex AI), Google TTS (Chirp3-HD).
-
-This module exposes run_bot() which builds the full pipeline.
-Use webrtc_runner.py or exotel_runner.py as entry points.
+"""Medical AI Voice Agent - Hinglish
+Exotel + Pipecat + Groq + Deepgram + ElevenLabs
+ 
+Replace all placeholders in .env file before deploying!
 """
-import json
+ 
 import os
-
 from dotenv import load_dotenv
 from loguru import logger
-
+ 
 load_dotenv(override=True)
-
+ 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame, EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -23,74 +22,71 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.runner.types import RunnerArguments
-from pipecat.services.google.llm_vertex import GoogleVertexLLMService
-from pipecat.services.google.stt import GoogleSTTService
-from pipecat.services.google.tts import GoogleTTSService
-from pipecat.transcriptions.language import Language
+from pipecat.services.groq import GroqLLMService
+from pipecat.services.deepgram import DeepgramSTTService
+from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.transports.base_transport import BaseTransport
-
-
+ 
+ 
+TRANSFER_NUMBER = os.getenv("TRANSFER_NUMBER", "+91XXXXXXXXXX")  # Doctor/Staff number
+ 
+ 
 async def run_bot(
     transport: BaseTransport,
     runner_args: RunnerArguments,
     audio_sample_rate: int | None = None,
 ):
-    """Build and run the voice-bot pipeline.
-
-    Args:
-        transport: The transport to use (WebRTC, Exotel WS, etc.).
-        runner_args: Pipecat runner arguments.
-        audio_sample_rate: Optional sample rate for audio in/out.
-            Pass 8000 for telephony (Exotel). Leave None for defaults (WebRTC).
-    """
-    # Google Speech-to-Text
-    stt = GoogleSTTService(
-        params=GoogleSTTService.InputParams(languages=Language.EN_US, model="chirp_3"),
-        credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-        location="asia-south1",
+    # ─── Speech to Text (Deepgram) ───────────────────────────────────────────
+    stt = DeepgramSTTService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        language="hi",           # Hindi + Hinglish
+        model="nova-2",
     )
-    # Google Gemini LLM via Vertex AI (Flash Lite)
-    creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    with open(creds_path) as f:
-        gcp_project = json.load(f)["project_id"]
-
-    llm = GoogleVertexLLMService(
-        credentials_path=creds_path,
-        project_id=gcp_project,
-        model="gemini-2.5-flash-lite",
-        params=GoogleVertexLLMService.InputParams(
-            temperature=0.7,
-            max_tokens=200,
-            thinking=GoogleVertexLLMService.ThinkingConfig(thinking_budget=0),
-        ),
+ 
+    # ─── LLM (Groq - Llama 3.3) ──────────────────────────────────────────────
+    llm = GroqLLMService(
+        api_key=os.getenv("GROQ_API_KEY"),
+        model="llama-3.3-70b-versatile",
     )
-    # Google Text-to-Speech (Chirp3-HD)
-    tts = GoogleTTSService(
-        voice_id="en-US-Chirp3-HD-Charon",
-        params=GoogleTTSService.InputParams(language=Language.EN_US),
-        credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+ 
+    # ─── Text to Speech (ElevenLabs) ─────────────────────────────────────────
+    tts = ElevenLabsTTSService(
+        api_key=os.getenv("ELEVENLABS_API_KEY"),
+        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),  # Your cloned voice ID
+        model="eleven_flash_v2_5",
     )
-
+ 
+    # ─── System Prompt ────────────────────────────────────────────────────────
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a friendly assistant. Keep answers short and conversational. "
-                "You are helping developers to build voice agents quickly. "
-                "Generate TTS friendly text. No emojis etc. Keep answers brief. "
-                "Don't generate long sentences. Please note that you are a voice assistant."
-                "Don't revela you details on LLM model or company that trained you. Keep the conversation centered around building voice agents"
+                "Aap ek helpful medical assistant hain jo Hinglish mein baat karte hain. "
+                "Hinglish matlab Hindi aur English ka mix. "
+                "Aapka kaam hai: "
+                "1. General health FAQs ka jawab dena. "
+                "2. Appointment scheduling mein help karna. "
+                "3. Medicine timing queries ka jawab dena. "
+                "\n\nZARURI RULES: "
+                "- Agar koi symptoms, diagnosis, ya serious medical advice maange "
+                "toh SIRF itna kaho: 'Main aapko doctor se connect karta hoon, ek moment.' "
+                "aur phir call transfer karo. "
+                "- Kabhi bhi clinical advice mat do. "
+                "- Hamesha polite aur helpful raho. "
+                "- Chhote aur simple jawab do — yeh voice call hai. "
+                "- Koi emoji mat use karo. "
             ),
         }
     ]
+ 
     context = LLMContext(messages)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.3)),
         ),
     )
-
+ 
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -100,25 +96,31 @@ async def run_bot(
         transport.output(),
         assistant_aggregator,
     ])
-
-    # Build pipeline params, optionally setting telephony sample rates
-    pipeline_params = PipelineParams(enable_metrics=True, enable_usage_metrics=True)
+ 
+    pipeline_params = PipelineParams(
+        enable_metrics=True,
+        enable_usage_metrics=True,
+    )
     if audio_sample_rate:
         pipeline_params.audio_in_sample_rate = audio_sample_rate
         pipeline_params.audio_out_sample_rate = audio_sample_rate
-
+ 
     task = PipelineTask(pipeline, params=pipeline_params)
-
+ 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected")
-        messages.append({"role": "system", "content": "Say hello briefly."})
+        logger.info("Call connected!")
+        messages.append({
+            "role": "system",
+            "content": "Caller se Hinglish mein greeting karo: 'Namaste! Main aapka medical assistant hoon. Aap apni query batayein, main help karunga!'"
+        })
         await task.queue_frames([LLMRunFrame()])
-
+ 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info("Client disconnected")
+        logger.info("Call disconnected!")
         await task.cancel()
-
+ 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     await runner.run(task)
+ 
